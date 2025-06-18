@@ -1,0 +1,224 @@
+﻿using Microsoft.Win32;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+// Новая библиотека для работы с ярлыками
+using IWshRuntimeLibrary;
+
+namespace MyVpnClientWPF
+{
+    public class SelectableApp : INotifyPropertyChanged
+    {
+        private bool _isSelected;
+        public string Name { get; set; }
+        public string FilePath { get; set; }
+        public ImageSource Icon { get; set; }
+        public bool IsSelected
+        {
+            get => _isSelected;
+            set
+            {
+                if (_isSelected != value)
+                {
+                    _isSelected = value;
+                    OnPropertyChanged(nameof(IsSelected));
+                }
+            }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        protected void OnPropertyChanged(string propertyName)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+
+    public partial class SplitTunnelingWindow : Window
+    {
+        private ObservableCollection<SelectableApp> AllApps = new ObservableCollection<SelectableApp>();
+        public List<string> SelectedAppPaths { get; private set; }
+
+        public SplitTunnelingWindow(List<string> previouslySelectedPaths)
+        {
+            InitializeComponent();
+            AppsListView.ItemsSource = AllApps;
+            LoadInstalledApps(previouslySelectedPaths ?? new List<string>());
+        }
+
+        private void LoadInstalledApps(List<string> previouslySelectedPaths)
+        {
+            var discoveredApps = new Dictionary<string, SelectableApp>(StringComparer.OrdinalIgnoreCase);
+
+            // --- НОВЫЙ ИСТОЧНИК ПОИСКА: МЕНЮ "ПУСК" ---
+            ScanStartMenuForApps(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), discoveredApps);
+            ScanStartMenuForApps(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), discoveredApps);
+
+            // --- УЛУЧШЕННОЕ СКАНИРОВАНИЕ РЕЕСТРА ---
+            ScanRegistryKeyForApps(Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", discoveredApps);
+            ScanRegistryKeyForApps(Registry.LocalMachine, @"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall", discoveredApps);
+            ScanRegistryKeyForApps(Registry.CurrentUser, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", discoveredApps);
+
+            // Добавляем ранее выбранные приложения, если их нет в списке
+            foreach (var path in previouslySelectedPaths)
+            {
+                if (System.IO.File.Exists(path) && !discoveredApps.ContainsKey(path))
+                {
+                    var app = CreateSelectableApp(path);
+                    if (app != null) discoveredApps.Add(path, app);
+                }
+            }
+
+            // Устанавливаем галочки и добавляем все в итоговый список
+            foreach (var app in discoveredApps.Values.OrderBy(a => a.Name))
+            {
+                if (previouslySelectedPaths.Any(p => p.Equals(app.FilePath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    app.IsSelected = true;
+                }
+                AllApps.Add(app);
+            }
+        }
+
+        // --- НОВЫЙ МЕТОД ДЛЯ СКАНИРОВАНИЯ МЕНЮ "ПУСК" ---
+        private void ScanStartMenuForApps(string directory, Dictionary<string, SelectableApp> discoveredApps)
+        {
+            if (!Directory.Exists(directory)) return;
+
+            try
+            {
+                var shell = new WshShell();
+                foreach (string linkPath in Directory.GetFiles(directory, "*.lnk", SearchOption.AllDirectories))
+                {
+                    try
+                    {
+                        var shortcut = (IWshShortcut)shell.CreateShortcut(linkPath);
+                        string exePath = shortcut.TargetPath;
+
+                        // Проверяем, что ярлык ведет на .exe файл и этот файл существует
+                        if (!string.IsNullOrEmpty(exePath) && exePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(exePath))
+                        {
+                            if (!discoveredApps.ContainsKey(exePath))
+                            {
+                                var app = CreateSelectableApp(exePath);
+                                if (app != null) discoveredApps.Add(exePath, app);
+                            }
+                        }
+                    }
+                    catch { /* Игнорируем "битые" или некорректные ярлыки */ }
+                }
+            }
+            catch { /* Игнорируем ошибки доступа к папкам */ }
+        }
+
+        private void ScanRegistryKeyForApps(RegistryKey rootKey, string keyPath, Dictionary<string, SelectableApp> discoveredApps)
+        {
+            // --- УЛУЧШЕННЫЕ ФИЛЬТРЫ ---
+            var uselessKeywords = new[] { "update", "redist", "driver", "service pack", "sdk" };
+
+            try
+            {
+                using (RegistryKey key = rootKey.OpenSubKey(keyPath))
+                {
+                    if (key == null) return;
+                    foreach (string subkey_name in key.GetSubKeyNames())
+                    {
+                        using (RegistryKey subkey = key.OpenSubKey(subkey_name))
+                        {
+                            string displayName = subkey.GetValue("DisplayName") as string;
+                            string displayIcon = subkey.GetValue("DisplayIcon") as string;
+                            object systemComponent = subkey.GetValue("SystemComponent");
+
+                            if (string.IsNullOrEmpty(displayName) || (systemComponent != null && (int)systemComponent == 1)) continue;
+                            if (uselessKeywords.Any(kw => displayName.ToLower().Contains(kw))) continue;
+
+                            string exePath = displayIcon?.Split(',')[0].Trim('"');
+
+                            if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
+                            {
+                                // Новый фильтр: игнорируем кэш установщиков
+                                if (exePath.Contains("Package Cache")) continue;
+
+                                if (!discoveredApps.ContainsKey(exePath))
+                                {
+                                    var app = CreateSelectableApp(exePath);
+                                    if (app != null) discoveredApps.Add(exePath, app);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { /* Игнорируем ошибки доступа к реестру */ }
+        }
+
+        private SelectableApp CreateSelectableApp(string exePath)
+        {
+            try
+            {
+                Icon appIcon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+                return new SelectableApp
+                {
+                    Name = Path.GetFileNameWithoutExtension(exePath),
+                    FilePath = exePath,
+                    Icon = Imaging.CreateBitmapSourceFromHIcon(
+                        appIcon.Handle,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromEmptyOptions()),
+                    IsSelected = false
+                };
+            }
+            catch { return null; }
+        }
+
+        private void AddAppButton_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFileDialog openFileDialog = new OpenFileDialog
+            {
+                Filter = "Исполняемые файлы (*.exe)|*.exe",
+                Title = "Выберите приложение"
+            };
+
+            if (openFileDialog.ShowDialog() == true)
+            {
+                string exePath = openFileDialog.FileName;
+                var existingApp = AllApps.FirstOrDefault(app => app.FilePath.Equals(exePath, StringComparison.OrdinalIgnoreCase));
+
+                if (existingApp == null)
+                {
+                    var app = CreateSelectableApp(exePath);
+                    if (app != null)
+                    {
+                        app.IsSelected = true;
+                        AllApps.Insert(0, app);
+                    }
+                }
+                else
+                {
+                    existingApp.IsSelected = true;
+                }
+            }
+        }
+
+        private void SaveButton_Click(object sender, RoutedEventArgs e)
+        {
+            SelectedAppPaths = AllApps.Where(app => app.IsSelected).Select(app => app.FilePath).ToList();
+            this.DialogResult = true;
+            this.Close();
+        }
+
+        private void CancelButton_Click(object sender, RoutedEventArgs e)
+        {
+            this.DialogResult = false;
+            this.Close();
+        }
+    }
+}

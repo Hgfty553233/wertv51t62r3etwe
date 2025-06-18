@@ -1,0 +1,166 @@
+﻿using Newtonsoft.Json.Linq; // Добавить для парсинга JSON
+using System;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Threading;
+using System.Net.Http; // Добавить
+using System.Threading.Tasks; // Добавить
+using System.Net.NetworkInformation; // Добавить для получения DNS-серверов
+
+namespace MyVpnClientWPF
+{
+    public partial class SpeedTestWindow : Window
+    {
+        private DispatcherTimer _speedTestPollTimer; // Переименован для ясности
+        private const int SpeedTestPollIntervalSeconds = 1; // Интервал опроса статуса
+
+        public SpeedTestWindow()
+        {
+            InitializeComponent();
+            StartSpeedTest();
+        }
+
+        private void StartSpeedTest() // Изменить на async void
+        {
+            // Сбрасываем видимость и текст при каждом новом запуске
+            ResultsStateGrid.Visibility = Visibility.Collapsed;
+            LoadingStateGrid.Visibility = Visibility.Visible;
+            SpeedTestStatusTextBlock.Text = "Запуск теста скорости... Пожалуйста, подождите.";
+
+            _speedTestPollTimer = new DispatcherTimer();
+            _speedTestPollTimer.Interval = TimeSpan.FromSeconds(SpeedTestPollIntervalSeconds);
+
+            bool testInitiated = false;
+
+            _speedTestPollTimer.Tick += async (sender, e) => // Добавить async
+            {
+                if (!testInitiated)
+                {
+                    testInitiated = true;
+                    IntPtr resultPtr = MainWindow.RunSpeedTest();
+                    string jsonResult = Marshal.PtrToStringAnsi(resultPtr);
+
+                    _speedTestPollTimer.Stop();
+
+                    await DisplaySpeedTestResult(jsonResult); // Добавить await
+                }
+            };
+            _speedTestPollTimer.Start();
+        }
+
+        private async Task DisplaySpeedTestResult(string jsonResult)  // Изменить на async void
+        {
+            LoadingStateGrid.Visibility = Visibility.Collapsed;
+            ResultsStateGrid.Visibility = Visibility.Visible;
+
+            if (string.IsNullOrEmpty(jsonResult))
+            {
+                SpeedTestStatusTextBlock.Visibility = Visibility.Visible;
+                SpeedTestStatusTextBlock.Text = "Не удалось получить результат теста скорости. Пустой ответ.";
+                ResultsStateGrid.Visibility = Visibility.Visible;
+                return;
+            }
+
+            try
+            {
+                if (jsonResult.Contains("Ошибка:") || jsonResult.Contains("Failed to"))
+                {
+                    SpeedTestStatusTextBlock.Visibility = Visibility.Visible;
+                    SpeedTestStatusTextBlock.Text = jsonResult;
+                    ResultsStateGrid.Visibility = Visibility.Visible;
+                    return;
+                }
+
+                JObject result = JObject.Parse(jsonResult);
+
+                string download = result["download"]?["bandwidth"] != null ? $"{(double)result["download"]["bandwidth"] / 125000:F2} Mbps" : "--";
+                string upload = result["upload"]?["bandwidth"] != null ? $"{(double)result["upload"]["bandwidth"] / 125000:F2} Mbps" : "--";
+                string ping = result["ping"]?["latency"] != null ? $"{(double)result["ping"]["latency"]:F2} ms" : "--";
+
+                if (result["download"]?["bandwidth"] != null)
+                {
+                    DownloadSpeedValueTextBlock.Text = $"{(double)result["download"]["bandwidth"] / 125000:F2}";
+                    DownloadSpeedUnitTextBlock.Text = "Mbps";
+                }
+                else
+                {
+                    DownloadSpeedValueTextBlock.Text = "--";
+                    DownloadSpeedUnitTextBlock.Text = "";
+                }
+
+                // Загрузка
+                if (result["upload"]?["bandwidth"] != null)
+                {
+                    UploadSpeedValueTextBlock.Text = $"{(double)result["upload"]["bandwidth"] / 125000:F2}";
+                    UploadSpeedUnitTextBlock.Text = "Mbps";
+                }
+                else
+                {
+                    UploadSpeedValueTextBlock.Text = "--";
+                    UploadSpeedUnitTextBlock.Text = "";
+                }
+
+                // Пинг
+                if (result["ping"]?["latency"] != null)
+                {
+                    PingValueTextBlock.Text = $"{(double)result["ping"]["latency"]:F2}";
+                    PingUnitTextBlock.Text = "ms";
+                }
+                else
+                {
+                    PingValueTextBlock.Text = "--";
+                    PingUnitTextBlock.Text = "";
+                }
+
+                string isp = result["isp"]?.ToString() ?? "Н/Д";
+                string serverName = result["server"]?["name"]?.ToString() ?? "Н/Д";
+                string serverLocation = result["server"]?["location"]?.ToString() ?? "Н/Д";
+
+                // Получаем публичный IP-адрес асинхронно
+                string publicIp = await GetPublicIpAddressAsync();
+
+                IspTextBlock.Text = $"Провайдер: {isp}";
+                ServerTextBlock.Text = $"Сервер: {serverName}, {serverLocation}";
+                IpAddressTextBlock.Text = $"Ваш IP-адрес: {publicIp}"; // Используем публичный IP
+
+                string effectiveDns = Marshal.PtrToStringAnsi(MainWindow.GetEffectiveDns());
+                DnsServersTextBlock.Text = $"Используемый DNS-сервер: {effectiveDns}";
+            }
+            catch (Newtonsoft.Json.JsonException ex)
+            {
+                SpeedTestStatusTextBlock.Visibility = Visibility.Visible;
+                SpeedTestStatusTextBlock.Text = $"Ошибка парсинга JSON: {ex.Message}\n\nНеобработанный ответ:\n{jsonResult}";
+                ResultsStateGrid.Visibility = Visibility.Visible;
+            }
+            catch (Exception ex)
+            {
+                SpeedTestStatusTextBlock.Visibility = Visibility.Visible;
+                SpeedTestStatusTextBlock.Text = $"Произошла общая ошибка: {ex.Message}\n\nНеобработанный ответ:\n{jsonResult}";
+                ResultsStateGrid.Visibility = Visibility.Visible;
+            }
+        }
+
+        private async Task<string> GetPublicIpAddressAsync()
+        {
+            try
+            {
+                using (HttpClient client = new HttpClient())
+                {
+                    // Можно использовать любой надежный сервис, например, ipify.org, ifconfig.me
+                    string ip = await client.GetStringAsync("https://api.ipify.org");
+                    return ip.Trim();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Логирование ошибки или вывод в консоль для отладки
+                System.Diagnostics.Debug.WriteLine($"Ошибка при получении публичного IP: {ex.Message}");
+                return "Не удалось получить IP";
+            }
+        }
+        private void CloseButton_Click(object sender, RoutedEventArgs e)
+        {
+            this.Close();
+        }
+    }
+}

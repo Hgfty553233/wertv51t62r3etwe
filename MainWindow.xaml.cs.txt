@@ -1,0 +1,626 @@
+﻿using Microsoft.Win32;
+using Newtonsoft.Json; // Для работы с JSON-файлом настроек
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Pipes;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Documents;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+namespace MyVpnClientWPF
+{
+    public partial class MainWindow : Window
+    {
+        private const string VpnCoreDll = "VpnCore.dll";
+
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern bool Connect();
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern bool Disconnect();
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern IntPtr GetStatus();
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void EnableAdBlock([MarshalAs(UnmanagedType.Bool)] bool enable);
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void EnableMaxAnonymityMode([MarshalAs(UnmanagedType.Bool)] bool enable);
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr RunSpeedTest();
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern IntPtr GetEffectiveDns(); // Добавьте эту строку
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern void InitializePipeServer();
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void SetCustomDns(string dns, [MarshalAs(UnmanagedType.Bool)] bool use_it);
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int GetPing();
+        [DllImport(VpnCoreDll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        public static extern int GetPublicPing(string targetIp);
+        public class AppSettings
+        {
+            public bool AutoConnectOnLaunch { get; set; } = false;
+
+            // ДОБАВЬТЕ ЭТИ ДВА СВОЙСТВА
+            public bool UseCustomDns { get; set; } = false;
+            public string CustomDnsAddress { get; set; } = "1.1.1.1";
+            public List<string> SplitTunnelingApps { get; set; } = new List<string>();
+            public bool IsSplitTunnelingEnabled { get; set; } = false;
+        }
+
+        private DispatcherTimer _rawPingTimer;
+        private DispatcherTimer _displayPingTimer;
+        private List<int> _pingHistory = new List<int>();
+        private const int MaxPingHistory = 20;
+        private bool _wasVpnConnected = false;
+        private string _publicPingTarget = "8.8.8.8";
+        private readonly string _settingsFilePath;
+
+        public MainWindow()
+        {
+            InitializePipeServer();
+            InitializeComponent();
+            // Определяем полный путь к файлу настроек
+            string appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string vpnAppFolder = Path.Combine(appDataPath, "MySuperVpn"); // Используем ту же папку, что и C++ ядро
+            _settingsFilePath = Path.Combine(vpnAppFolder, "settings.json");
+            InitializeTimers();
+            UpdateStatusAndButtonText();
+            ShowHomePageContent();
+            // Устанавливаем начальное состояние переключателя AdBlock в ВЫКЛЮЧЕНО
+            AdBlockToggle.IsChecked = false;
+            // Загружаем настройки DNS
+            AppSettings settings = LoadSettings();
+            // Загружаем настройки и проверяем флаг автоподключения
+            if (settings.AutoConnectOnLaunch)
+            {
+                // Если опция включена, имитируем клик по кнопке подключения
+                ConnectButton_Click(this, new RoutedEventArgs());
+            }
+            SetCustomDns(settings.CustomDnsAddress, settings.UseCustomDns);
+        }
+
+        private const string RunKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+        // Ключ, где Диспетчер задач хранит информацию об отключенных элементах
+        private const string StartupApprovedKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+        // Имя нашего приложения в реестре
+        private const string AppNameInRegistry = "MySuperVPN";
+        // Новая, финальная версия функции
+        private bool CheckAndApplyStartup(bool desiredState)
+        {
+            try
+            {
+                // Открываем основной ключ для записи
+                using (RegistryKey runKey = Registry.CurrentUser.OpenSubKey(RunKey, true))
+                {
+                    if (desiredState) // Если мы хотим ВКЛЮЧИТЬ автозагрузку
+                    {
+                        // Всегда убеждаемся, что запись в основном ключе есть
+                        string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                        runKey.SetValue(AppNameInRegistry, $"\"{exePath}\"");
+
+                        // Теперь проверяем, не отключил ли пользователь нас в Диспетчере задач
+                        using (RegistryKey approvedKey = Registry.CurrentUser.OpenSubKey(StartupApprovedKey, true)) // Открываем для записи
+                        {
+                            var value = approvedKey?.GetValue(AppNameInRegistry) as byte[];
+                            // Если значение существует и оно "отключено"
+                            if (value != null && (value.Length < 1 || value[0] != 2))
+                            {
+                                var result = MessageBox.Show(
+                                    "Автозагрузка для этого приложения была отключена вручную через Диспетчер задач.\n\nРазрешить приложению принудительно включить ее?",
+                                    "Применение настроек",
+                                    MessageBoxButton.YesNo,
+                                    MessageBoxImage.Question);
+
+                                if (result == MessageBoxResult.Yes)
+                                {
+                                    // --- НОВАЯ ЛОГИКА ---
+                                    // Принудительно включаем, записывая "правильное" бинарное значение
+                                    byte[] enabledValue = new byte[] { 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+                                    approvedKey.SetValue(AppNameInRegistry, enabledValue, RegistryValueKind.Binary);
+                                }
+                                else
+                                {
+                                    // Пользователь отказался, возвращаем false, чтобы галочка в UI снялась
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    else // Если мы хотим ВЫКЛЮЧИТЬ автозагрузку
+                    {
+                        // Просто удаляем запись из основного ключа
+                        runKey.DeleteValue(AppNameInRegistry, false);
+                        // На всякий случай удаляем и из ключа Диспетчера задач
+                        using (RegistryKey approvedKey = Registry.CurrentUser.OpenSubKey(StartupApprovedKey, true))
+                        {
+                            approvedKey?.DeleteValue(AppNameInRegistry, false);
+                        }
+                    }
+                }
+                return true; // Операция успешна
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Не удалось изменить настройки автозагрузки: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                return false;
+            }
+        }
+        private AppSettings LoadSettings()
+        {
+            if (File.Exists(_settingsFilePath))
+            {
+                string json = File.ReadAllText(_settingsFilePath);
+                return JsonConvert.DeserializeObject<AppSettings>(json);
+            }
+            return new AppSettings(); // Возвращаем настройки по умолчанию, если файла нет
+        }
+        
+
+        private void ReconnectVpn()
+        {
+            if (Disconnect())
+            {
+                // Используем таймер, чтобы дать службе WireGuard время полностью остановиться
+                // перед новой попыткой подключения.
+                var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                timer.Tick += (s, args) =>
+                {
+                    timer.Stop();
+                    Connect();
+                };
+                timer.Start();
+            }
+        }
+        private void CustomDns_Changed(object sender, RoutedEventArgs e)
+        {
+            // Блокируем/разблокируем поле для ввода текста в зависимости от галочки
+            if (CustomDnsTextBox != null)
+            {
+                CustomDnsTextBox.IsEnabled = UseCustomDnsCheckBox.IsChecked == true;
+            }
+
+            // Если пользовательский DNS включается, отключаем AdBlock
+            if (UseCustomDnsCheckBox.IsChecked == true) // Если пользовательский DNS сейчас включен
+            {
+                if (AdBlockToggle.IsChecked == true) // И AdBlock тоже включен
+                {
+                    AdBlockToggle.IsChecked = false; // Отключаем AdBlock
+                                                     // AdBlockToggle_Unchecked будет вызван автоматически при изменении IsChecked,
+                                                     // который сохранит настройки и уведомит C++ ядро.
+                }
+            }
+
+            // Сохраняем новое состояние в файл настроек
+            AppSettings settings = LoadSettings();
+            settings.UseCustomDns = UseCustomDnsCheckBox.IsChecked == true;
+            settings.CustomDnsAddress = CustomDnsTextBox.Text;
+            SaveSettings(settings);
+
+            // Сразу же отправляем новые настройки в C++ ядро
+            SetCustomDns(settings.CustomDnsAddress, settings.UseCustomDns);
+            // Предлагаем пользователю переподключиться, чтобы применить настройки
+            HandleDnsChange();
+        }
+        // Функция для сохранения настроек в файл
+        private void SaveSettings(AppSettings settings)
+        {
+            string json = JsonConvert.SerializeObject(settings, Formatting.Indented);
+            File.WriteAllText(_settingsFilePath, json);
+        }
+        private void AutoConnectCheckBox_Click(object sender, RoutedEventArgs e)
+        {
+            AppSettings currentSettings = LoadSettings();
+            currentSettings.AutoConnectOnLaunch = AutoConnectCheckBox.IsChecked == true;
+            SaveSettings(currentSettings);
+        }
+        private void StartupCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            bool isChecked = StartupCheckBox.IsChecked == true;
+            bool success = CheckAndApplyStartup(isChecked);
+
+            // Если операция не удалась (например, пользователь отказался включать в Диспетчере),
+            // а мы пытались включить, то возвращаем галочку в выключенное состояние.
+            if (!success && isChecked)
+            {
+                StartupCheckBox.IsChecked = false;
+            }
+        }
+        // Функция для проверки, включена ли автозагруз
+        private void InitializeTimers()
+        {
+            _rawPingTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _rawPingTimer.Tick += RawPingTimer_Tick;
+            _rawPingTimer.Start();
+
+            _displayPingTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
+            _displayPingTimer.Tick += DisplayPingTimer_Tick;
+            _displayPingTimer.Start();
+            DisplayPingTimer_Tick(null, null);
+        }
+
+        private string GetVpnStatusString()
+        {
+            IntPtr statusPtr = GetStatus();
+            if (statusPtr != IntPtr.Zero)
+            {
+                return Marshal.PtrToStringAnsi(statusPtr);
+            }
+            return "Ошибка: Не удалось получить статус.";
+        }
+
+        private void RawPingTimer_Tick(object sender, EventArgs e)
+        {
+            UpdateStatusAndButtonText();
+            string currentStatus = GetVpnStatusString();
+            bool isCurrentlyConnected = currentStatus.Contains("Connected") || currentStatus.Contains("Подключен");
+
+            if (isCurrentlyConnected != _wasVpnConnected)
+            {
+                _pingHistory.Clear();
+                DisplayPingTimer_Tick(null, null);
+            }
+            _wasVpnConnected = isCurrentlyConnected;
+
+            int rawPing = isCurrentlyConnected ? GetPing() : GetPublicPing(_publicPingTarget);
+
+            if (rawPing >= 0)
+            {
+                _pingHistory.Add(rawPing);
+                if (_pingHistory.Count > MaxPingHistory)
+                {
+                    _pingHistory.RemoveAt(0);
+                }
+                DisplayPingTimer_Tick(null, null);
+            }
+            else
+            {
+                DisplayPingTimer_Tick(null, null);
+            }
+        }
+
+        private void DisplayPingTimer_Tick(object sender, EventArgs e)
+        {
+            string currentStatus = GetVpnStatusString();
+            bool isCurrentlyConnected = currentStatus.Contains("Connected") || currentStatus.Contains("Подключен");
+
+            if (_pingHistory.Any())
+            {
+                double averagePing = _pingHistory.Average();
+                int roundedPing = (int)Math.Round(averagePing);
+
+                PingTextBlock.Inlines.Clear();
+                PingTextBlock.Inlines.Add(new Run("Пинг: "));
+                PingValueRun = new Run(roundedPing.ToString()) { FontWeight = FontWeights.Bold };
+                PingTextBlock.Inlines.Add(PingValueRun);
+                PingTextBlock.Inlines.Add(new Run(" мс"));
+
+                if (roundedPing >= 10 && roundedPing <= 60)
+                {
+                    PingValueRun.Foreground = (Brush)FindResource("PingGoodColor");
+                }
+                else if (roundedPing >= 61 && roundedPing <= 70)
+                {
+                    PingValueRun.Foreground = (Brush)FindResource("PingMediumColor");
+                }
+                else if (roundedPing > 70)
+                {
+                    PingValueRun.Text = "70+";
+                    PingValueRun.Foreground = (Brush)FindResource("PingMediumColor");
+                }
+                else
+                {
+                    PingValueRun.Foreground = (Brush)FindResource("PingGoodColor");
+                }
+            }
+            else
+            {
+                if (isCurrentlyConnected)
+                {
+                    PingTextBlock.Inlines.Clear();
+                    PingTextBlock.Inlines.Add(new Run("Пинг: "));
+                    PingTextBlock.Inlines.Add(new Run("Загрузка данных...") { Foreground = (Brush)FindResource("ForegroundColor") });
+                }
+                else
+                {
+                    PingTextBlock.Inlines.Clear();
+                    PingTextBlock.Inlines.Add(new Run("Пинг: "));
+                    PingTextBlock.Inlines.Add(new Run("Недоступен") { Foreground = (Brush)FindResource("ForegroundColor") });
+                }
+            }
+        }
+
+        private void ConnectButton_Click(object sender, RoutedEventArgs e)
+        {
+            string currentStatus = GetVpnStatusString();
+            if (currentStatus.Contains("Disconnected") || currentStatus.Contains("Отключен"))
+            {
+                if (Connect())
+                {
+                    StatusTextBlock.Text = "Статус: Подключение";
+                    _pingHistory.Clear();
+                }
+                else
+                {
+                    StatusTextBlock.Text = "Статус: Ошибка подключения.";
+                }
+            }
+            else if (currentStatus.Contains("Connected") || currentStatus.Contains("Подключен"))
+            {
+                if (Disconnect())
+                {
+                    StatusTextBlock.Text = "Статус: Отключение";
+                }
+                else
+                {
+                    StatusTextBlock.Text = "Статус: Ошибка отключения.";
+                }
+            }
+            DisplayPingTimer_Tick(null, null);
+        }
+
+        private void UpdateStatusAndButtonText()
+        {
+            string currentStatus = GetVpnStatusString(); // Предполагается, что этот метод у тебя есть
+            StatusTextBlock.Text = "Статус: " + currentStatus;
+
+            if (currentStatus.Contains("Connected") || currentStatus.Contains("Подключен"))
+            {
+                ConnectButton.Content = "Отключить";
+
+                // ПРАВИЛЬНО: Применяем стиль для кнопки "Отключить"
+                ConnectButton.Style = (Style)FindResource("DisconnectButtonStyle");
+            }
+            else
+            {
+                ConnectButton.Content = "Подключить";
+
+                // ПРАВИЛЬНО: Возвращаем основной стиль для кнопки "Подключить"
+                ConnectButton.Style = (Style)FindResource("ConnectButtonStyle");
+            }
+        }
+        // ДОБАВЬТЕ ЭТОТ МЕТОД В КЛАСС MainWindow
+
+        // В файле MainWindow.xaml.cs
+        // Добавьте эту функцию в класс MainWindow в MainWindow.xaml.cs
+
+        private void SendSplitTunnelingUpdateToCore(List<string> appPaths)
+        {
+            // Формируем команду: "SET_APPS:путь1;путь2;путь3"
+            string command = "SET_APPS:" + string.Join(";", appPaths);
+
+            try
+            {
+                // Создаем клиент для подключения к нашему именованному каналу
+                using (var pipeClient = new NamedPipeClientStream(".", "MySuperVpnPipe", PipeDirection.Out))
+                {
+                    pipeClient.Connect(500); // Пытаемся подключиться в течение 500 мс
+                    if (pipeClient.IsConnected)
+                    {
+                        using (var writer = new StreamWriter(pipeClient))
+                        {
+                            writer.Write(command);
+                            writer.Flush();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // В реальном приложении здесь стоит добавить логирование ошибки
+                MessageBox.Show("Не удалось отправить настройки в службу VPN: " + ex.Message, "Ошибка IPC");
+            }
+        }
+        private void ConfigureSplitTunneling_Click(object sender, RoutedEventArgs e)
+        {
+            var settings = LoadSettings();
+            bool wasConnected = GetVpnStatusString().Contains("Подключен");
+            int appsCountBefore = settings.SplitTunnelingApps.Count;
+
+            var splitTunnelingWindow = new SplitTunnelingWindow(settings.SplitTunnelingApps);
+            splitTunnelingWindow.Owner = this;
+
+            if (splitTunnelingWindow.ShowDialog() == true)
+            {
+                settings.SplitTunnelingApps = splitTunnelingWindow.SelectedAppPaths;
+                SaveSettings(settings);
+
+                // Отправляем обновленный список в C++ ядро
+                SendSplitTunnelingUpdateToCore(settings.SplitTunnelingApps);
+
+                int appsCountAfter = settings.SplitTunnelingApps.Count;
+
+                // Предлагаем переподключиться, если VPN был активен и список приложений изменился
+                if (wasConnected && appsCountBefore != appsCountAfter)
+                {
+                    var result = MessageBox.Show(
+                       "Список приложений для раздельного туннелирования был изменен. Для применения настроек необходимо переподключиться. Сделать это сейчас?",
+                       "Применение настроек",
+                       MessageBoxButton.YesNo,
+                       MessageBoxImage.Question);
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        ReconnectVpn();
+                    }
+                }
+                else
+                {
+                    MessageBox.Show("Список приложений сохранен.", "Успех");
+                }
+            }
+        }
+        private void NavigationButton_Click(object sender, RoutedEventArgs e)
+        {
+            // ИСПРАВЛЕНИЕ: Проверяем, что отправитель - это RadioButton, а не Button
+            if (sender is RadioButton clickedButton)
+            {
+                switch (clickedButton.Name)
+                {
+                    case "HomeButton":
+                        ShowHomePageContent();
+                        break;
+                    case "StatisticsButton":
+                        ShowStatisticsPageContent();
+                        break;
+                    case "SettingsButton":
+                        ShowSettingsPageContent();
+                        break;
+                }
+            }
+        }
+
+        private void HideAllPages()
+        {
+            HomePageContainer.Visibility = Visibility.Collapsed;
+            StatisticsPageContainer.Visibility = Visibility.Collapsed;
+            SettingsPageContainer.Visibility = Visibility.Collapsed;
+        }
+
+        private void ShowHomePageContent()
+        {
+            HideAllPages();
+            HomePageContainer.Visibility = Visibility.Visible;
+            UpdateStatusAndButtonText();
+            DisplayPingTimer_Tick(null, null);
+        }
+
+        private void ShowStatisticsPageContent()
+        {
+            HideAllPages();
+            StatisticsPageContainer.Visibility = Visibility.Visible;
+        }
+
+        private void ShowSettingsPageContent()
+        {
+            HideAllPages();
+            SettingsPageContainer.Visibility = Visibility.Visible;
+
+            var settings = LoadSettings();
+            AutoConnectCheckBox.IsChecked = settings.AutoConnectOnLaunch;
+            UseCustomDnsCheckBox.IsChecked = settings.UseCustomDns;
+            CustomDnsTextBox.Text = settings.CustomDnsAddress;
+            CustomDnsTextBox.IsEnabled = settings.UseCustomDns;
+
+            // --- НОВАЯ ЛОГИКА ДЛЯ SPLIT TUNNELING ---
+            // Загружаем состояние главного переключателя из настроек
+            SplitTunnelingEnabledCheckBox.IsChecked = settings.IsSplitTunnelingEnabled;
+
+            try
+            {
+                bool isEnabledInRun = false;
+                bool isDisabledInTaskManager = false;
+                using (RegistryKey runKey = Registry.CurrentUser.OpenSubKey(RunKey, false))
+                {
+                    isEnabledInRun = (runKey?.GetValue(AppNameInRegistry) != null);
+                }
+                using (RegistryKey approvedKey = Registry.CurrentUser.OpenSubKey(StartupApprovedKey, false))
+                {
+                    var value = approvedKey?.GetValue(AppNameInRegistry) as byte[];
+                    if (value != null && (value.Length < 1 || value[0] != 2))
+                    {
+                        isDisabledInTaskManager = true;
+                    }
+                }
+                StartupCheckBox.IsChecked = isEnabledInRun && !isDisabledInTaskManager;
+            }
+            catch { /* Игнорируем возможные ошибки чтения реестра */ }
+        }
+        private void SplitTunnelingEnabled_Changed(object sender, RoutedEventArgs e)
+        {
+            // Проверяем, что окно уже загружено, чтобы этот код не срабатывал при инициализации
+            if (!this.IsLoaded) return;
+
+            bool isEnabled = SplitTunnelingEnabledCheckBox.IsChecked == true;
+            bool wasConnected = GetVpnStatusString().Contains("Подключен");
+            var settings = LoadSettings();
+
+            // Сохраняем новое состояние
+            settings.IsSplitTunnelingEnabled = isEnabled;
+            SaveSettings(settings);
+
+            // Если функция включена, отправляем список сохраненных приложений.
+            // Если выключена - отправляем ПУСТОЙ список. C++ ядро воспримет это как
+            // команду туннелировать весь трафик (AllowedIPs = 0.0.0.0/0).
+            if (isEnabled)
+            {
+                SendSplitTunnelingUpdateToCore(settings.SplitTunnelingApps);
+            }
+            else
+            {
+                SendSplitTunnelingUpdateToCore(new List<string>());
+            }
+
+            // Предлагаем переподключиться, если VPN был активен
+            if (wasConnected)
+            {
+                var result = MessageBox.Show(
+                    "Настройки раздельного туннелирования были изменены. Для их применения необходимо переподключиться. Сделать это сейчас?",
+                    "Применение настроек",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    ReconnectVpn();
+                }
+            }
+        }
+        private void AdBlockToggle_Checked(object sender, RoutedEventArgs e)
+        {
+            EnableAdBlock(true);
+            // Если AdBlock включается, отключаем использование пользовательского DNS
+            if (UseCustomDnsCheckBox.IsChecked == true) // Проверяем, если пользовательский DNS уже включен
+            {
+                UseCustomDnsCheckBox.IsChecked = false; // Отключаем его
+                                                        // CustomDns_Changed будет вызван автоматически при изменении IsChecked,
+                                                        // который сохранит настройки и уведомит C++ ядро.
+            }
+            HandleDnsChange();
+        }
+
+        private void AdBlockToggle_Unchecked(object sender, RoutedEventArgs e)
+        {
+            EnableAdBlock(false);
+            HandleDnsChange();
+        }
+
+        private void HandleDnsChange()
+        {
+            string currentStatus = GetVpnStatusString();
+            bool isCurrentlyConnected = currentStatus.Contains("Connected") || currentStatus.Contains("Подключен");
+
+            if (isCurrentlyConnected)
+            {
+                var result = MessageBox.Show(
+                    "Для смены режима блокировки рекламы необходимо переподключиться. Выполнить сейчас?",
+                    "Применение настроек",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    Disconnect();
+                    DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                    timer.Tick += (s, args) =>
+                    {
+                        timer.Stop();
+                        Connect();
+                    };
+                    timer.Start();
+                }
+            }
+        }
+
+        private void MaxAnonymityToggle_Checked(object sender, RoutedEventArgs e) => EnableMaxAnonymityMode(true);
+        private void MaxAnonymityToggle_Unchecked(object sender, RoutedEventArgs e) => EnableMaxAnonymityMode(false);
+        private void SpeedTestButton_Click(object sender, RoutedEventArgs e)
+        {
+            SpeedTestWindow speedTestWindow = new SpeedTestWindow();
+            speedTestWindow.ShowDialog(); // Открываем новое окно как модальное
+        }
+    }
+}

@@ -1,0 +1,399 @@
+﻿<Window x:Class="MyVpnClientWPF.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:MyVpnClientWPF"
+        mc:Ignorable="d"
+        Title="My VPN Client" Height="600" Width="900"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="SingleBorderWindow">
+    <Window.Resources>
+        <SolidColorBrush x:Key="PrimaryBackgroundColor" Color="#F0F2F5"/>
+        <SolidColorBrush x:Key="SecondaryBackgroundColor" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="MenuBackgroundColor" Color="#FFFFFF"/>
+
+        <SolidColorBrush x:Key="AccentColor" Color="#51d0de"/>
+        <SolidColorBrush x:Key="SecondaryAccentColor" Color="#bf4aa8"/>
+        <SolidColorBrush x:Key="ForegroundColor" Color="#1E1E1E"/>
+        <SolidColorBrush x:Key="ForegroundMutedColor" Color="#666666"/>
+        <SolidColorBrush x:Key="BorderColor" Color="#E0E0E0"/>
+
+        <SolidColorBrush x:Key="PingGoodColor" Color="#00C853"/>
+        <SolidColorBrush x:Key="PingMediumColor" Color="#FFAB00"/>
+        <SolidColorBrush x:Key="PingBadColor" Color="#D50000"/>
+
+        <Geometry x:Key="IconHome">M4,10V20H8V14H16V20H20V10L12,3Z</Geometry>
+        <Geometry x:Key="IconStats">M4,18H6V10H4V18M8,18H10V6H8V18M12,18H14V14H12V18M16,18H18V2H16V18Z</Geometry>
+        <Geometry x:Key="IconSettings">M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41H9.08c-0.24,0-0.44,0.17-0.48,0.41L8.28,5.15C7.69,5.39,7.16,5.71,6.66,6.09L4.27,5.13C4.05,5.04,3.8,5.11,3.68,5.33L1.76,8.65c-0.11,0.2-0.06,0.47,0.12,0.61l2.03,1.58C3.88,11.36,3.86,11.68,3.86,12c0,0.32,0.02,0.64,0.07,0.94l-2.03,1.58c-0.18-0.14-0.23-0.41-0.12-0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.32,2.34c0.04,0.24,0.24-0.41,0.48,0.41h4.84c0.24,0-0.44,0.17-0.48,0.41l0.32-2.34c0.59-0.24,1.12-0.56,1.62-0.94l2.39,0.96c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.2,0.07-0.47-0.12-0.61L19.14,12.94z M12,15c-1.66,0-3-1.34-3-3s1.34-3,3-3s3,1.34,3,3S13.66,15,12,15z</Geometry>
+
+        <Style x:Key="NavRadioButtonStyle" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedColor}"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="NavButtonBorder" Background="Transparent" CornerRadius="8" Margin="10,4" Padding="15,12">
+                            <StackPanel Orientation="Horizontal">
+                                <Path x:Name="Icon" Data="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}" Fill="{TemplateBinding Foreground}" Width="20" Height="20" Stretch="Uniform" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="NavText" Text="{TemplateBinding Content}" VerticalAlignment="Center" Margin="15,0,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="NavButtonBorder" Property="Background" Value="#1A51d0de"/>
+                                <Setter Property="Foreground" Value="{StaticResource AccentColor}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Foreground" Value="{StaticResource AccentColor}"/>
+                                <Setter TargetName="NavText" Property="FontWeight" Value="SemiBold"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ConnectButtonStyle" TargetType="Button">
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Width" Value="200"/>
+            <Setter Property="Height" Value="52"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{StaticResource AccentColor}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderThickness="0" CornerRadius="26">
+                            <Border.Effect>
+                                <DropShadowEffect x:Name="shadow" ShadowDepth="0" Color="{Binding Color, Source={StaticResource AccentColor}}" Opacity="0" BlurRadius="20"/>
+                            </Border.Effect>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="shadow" Storyboard.TargetProperty="Opacity" To="0.7" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="shadow" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="RenderTransform">
+                                    <Setter.Value>
+                                        <ScaleTransform ScaleX="0.95" ScaleY="0.95" CenterX="100" CenterY="26"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DisconnectButtonStyle" TargetType="Button">
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Width" Value="200"/>
+            <Setter Property="Height" Value="52"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedColor}"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="{StaticResource BorderColor}" BorderThickness="2" CornerRadius="26">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#10000000"/>
+                                <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#20000000"/>
+                                <Setter TargetName="border" Property="RenderTransform">
+                                    <Setter.Value>
+                                        <ScaleTransform ScaleX="0.95" ScaleY="0.95" CenterX="100" CenterY="26"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SettingsCard" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SecondaryBackgroundColor}"/>
+            <Setter Property="Padding" Value="20"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Margin" Value="0,0,0,15"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderColor}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style x:Key="SettingsHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+        </Style>
+        <Style x:Key="SettingsDescription" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedColor}"/>
+            <Setter Property="Margin" Value="0,5,0,15"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style x:Key="ToggleSwitchStyle" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <Grid VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ContentPresenter Grid.Column="0" VerticalAlignment="Center" Margin="0,0,10,0" RecognizesAccessKey="True"/>
+                            <Border x:Name="Track" Grid.Column="1" Width="44" Height="24" Background="#BDBDBD" CornerRadius="12">
+                                <Ellipse x:Name="Thumb" Fill="White" Width="18" Height="18" HorizontalAlignment="Left" Margin="3,0,0,0">
+                                    <Ellipse.RenderTransform>
+                                        <TranslateTransform x:Name="ThumbTransform" />
+                                    </Ellipse.RenderTransform>
+                                    <Ellipse.Effect>
+                                        <DropShadowEffect ShadowDepth="1" Color="#000000" Opacity="0.2" BlurRadius="2"/>
+                                    </Ellipse.Effect>
+                                </Ellipse>
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Track" Property="Background" Value="{StaticResource SecondaryAccentColor}"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="20" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="ThumbTransform" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="ThemedTextBoxStyle" TargetType="TextBox">
+            <Setter Property="Background" Value="#EEEEEE"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderColor}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="CaretBrush" Value="{StaticResource ForegroundColor}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost" Focusable="false" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter Property="BorderBrush" Value="{StaticResource AccentColor}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ThemedDataGridStyle" TargetType="DataGrid">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#E0E0E0"/>
+            <Setter Property="VerticalGridLinesBrush" Value="Transparent"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserResizeRows" Value="False"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="RowHeight" Value="40"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="IsReadOnly" Value="True"/>
+        </Style>
+        <Style x:Key="ThemedDataGridColumnHeaderStyle" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedColor}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Padding" Value="15,10"/>
+            <Setter Property="BorderThickness" Value="0,0,0,2"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderColor}"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+        </Style>
+        <Style x:Key="ThemedDataGridRowStyle" TargetType="DataGridRow">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#F5F5F5"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="ThemedDataGridCellStyle" TargetType="DataGridCell">
+            <Setter Property="Padding" Value="15,8"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="DataGridCell">
+                        <Border Padding="{TemplateBinding Padding}" Background="{TemplateBinding Background}">
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource PrimaryBackgroundColor}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Background="{StaticResource MenuBackgroundColor}">
+            <Border.Effect>
+                <DropShadowEffect ShadowDepth="1" Color="#000000" Opacity="0.05" BlurRadius="10" Direction="270"/>
+            </Border.Effect>
+            <StackPanel>
+                <TextBlock Text="VPN Client" Foreground="{StaticResource AccentColor}" FontSize="24" FontWeight="Bold" Margin="0,20,0,30" HorizontalAlignment="Center"/>
+                <RadioButton x:Name="HomeButton" Content="Главная" IsChecked="True" Style="{StaticResource NavRadioButtonStyle}" Tag="{StaticResource IconHome}" Click="NavigationButton_Click"/>
+                <RadioButton x:Name="StatisticsButton" Content="Статистика" Style="{StaticResource NavRadioButtonStyle}" Tag="{StaticResource IconStats}" Click="NavigationButton_Click"/>
+                <RadioButton x:Name="SettingsButton" Content="Настройки" Style="{StaticResource NavRadioButtonStyle}" Tag="{StaticResource IconSettings}" Click="NavigationButton_Click"/>
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Column="1">
+            <Grid x:Name="HomePageContainer">
+                <TextBlock x:Name="StatusTextBlock" Text="Статус: Отключен" Padding="15" FontSize="24" FontWeight="Bold" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="169,87,0,0" Foreground="{StaticResource ForegroundColor}"/>
+                <TextBlock x:Name="PingTextBlock" FontSize="16" Foreground="{StaticResource ForegroundColor}" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="234,340,0,0">
+                    <TextBlock.Inlines>
+                        <Run Text="Пинг: "/>
+                        <Run x:Name="PingValueRun" Text="Н/Д" FontWeight="Bold"/>
+                        <Run Text=" мс"/>
+                    </TextBlock.Inlines>
+                </TextBlock>
+                <Button x:Name="ConnectButton" Content="Подключить" Style="{StaticResource ConnectButtonStyle}" Click="ConnectButton_Click" Margin="178,414,0,0" HorizontalAlignment="Left"/>
+                <Border x:Name="AdBlockBorder" Background="{StaticResource SecondaryBackgroundColor}" BorderThickness="1" BorderBrush="{StaticResource BorderColor}" Padding="15" Width="220" CornerRadius="12" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,96,20,0">
+                    <Grid>
+                        <TextBlock Text="Включить AdBlock" FontSize="16" VerticalAlignment="Center" Foreground="{StaticResource ForegroundColor}"/>
+                        <CheckBox x:Name="AdBlockToggle" Checked="AdBlockToggle_Checked" Unchecked="AdBlockToggle_Unchecked" Content="" HorizontalAlignment="Right" Style="{StaticResource ToggleSwitchStyle}"/>
+                    </Grid>
+                </Border>
+                <Border x:Name="MaxAnonymityBorder" Background="{StaticResource SecondaryBackgroundColor}" BorderThickness="1" BorderBrush="{StaticResource BorderColor}" Padding="15" Width="220" CornerRadius="12" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,178,20,0">
+                    <Grid>
+                        <TextBlock Text="Режим макс. анонимности" FontSize="16" VerticalAlignment="Center" Foreground="{StaticResource ForegroundColor}" TextWrapping="Wrap" LineHeight="20"/>
+                        <CheckBox x:Name="MaxAnonymityToggle" Checked="MaxAnonymityToggle_Checked" Unchecked="MaxAnonymityToggle_Unchecked" Content="" HorizontalAlignment="Right" Style="{StaticResource ToggleSwitchStyle}"/>
+                    </Grid>
+                </Border>
+                <Border x:Name="SpeedTestBorder" Background="{StaticResource SecondaryBackgroundColor}" BorderThickness="1" BorderBrush="{StaticResource BorderColor}" Padding="15" Width="220" CornerRadius="12" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,260,20,0">
+                    <Grid>
+                        <TextBlock Text="Тест скорости" FontSize="16" VerticalAlignment="Center" Foreground="{StaticResource ForegroundColor}"/>
+                        <Button x:Name="SpeedTestButton" Click="SpeedTestButton_Click" Content="ЗАПУСК" HorizontalAlignment="Right" Background="#555" BorderThickness="0" Foreground="White"/>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <Grid x:Name="StatisticsPageContainer" Visibility="Collapsed">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="30">
+                        <TextBlock Text="Статистика" FontSize="32" FontWeight="Bold" Foreground="{StaticResource ForegroundColor}" Margin="0,0,0,20"/>
+                        <Border Style="{StaticResource SettingsCard}">
+                            <StackPanel>
+                                <TextBlock Text="Использовано за сессию: 1.2 GB" FontSize="18" Foreground="{StaticResource ForegroundColor}"/>
+                                <TextBlock Text="Всего использовано: 35.7 GB" FontSize="18" Foreground="{StaticResource ForegroundColor}" Margin="0,10,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Text="История подключений" FontSize="22" FontWeight="SemiBold" Foreground="{StaticResource ForegroundColor}" Margin="0,30,0,10"/>
+                        <Border Style="{StaticResource SettingsCard}">
+                            <DataGrid Name="HistoryDataGrid" 
+                                      Style="{StaticResource ThemedDataGridStyle}"
+                                      ColumnHeaderStyle="{StaticResource ThemedDataGridColumnHeaderStyle}"
+                                      RowStyle="{StaticResource ThemedDataGridRowStyle}"
+                                      CellStyle="{StaticResource ThemedDataGridCellStyle}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Дата" Width="*" Binding="{x:Null}"/>
+                                    <DataGridTextColumn Header="Длительность" Width="*" Binding="{x:Null}"/>
+                                    <DataGridTextColumn Header="Скачано" Width="*" Binding="{x:Null}"/>
+                                    <DataGridTextColumn Header="Отправлено" Width="*" Binding="{x:Null}"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+
+            <Grid x:Name="SettingsPageContainer" Visibility="Collapsed">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="30">
+                        <TextBlock Text="Настройки" FontSize="32" FontWeight="Bold" Foreground="{StaticResource ForegroundColor}" Margin="0,0,0,20"/>
+                        <Border Style="{StaticResource SettingsCard}">
+                            <StackPanel>
+                                <TextBlock Text="Split Tunneling" Style="{StaticResource SettingsHeader}"/>
+                                <TextBlock Text="Выбор приложений или сайтов для работы через VPN." Style="{StaticResource SettingsDescription}"/>
+                                <CheckBox x:Name="SplitTunnelingEnabledCheckBox" 
+          Content="Включить Split Tunneling" 
+          Foreground="{StaticResource ForegroundColor}" 
+          Style="{StaticResource ToggleSwitchStyle}"
+          Checked="SplitTunnelingEnabled_Changed"
+          Unchecked="SplitTunnelingEnabled_Changed"/>
+
+                                <Button Content="Настроить приложения" 
+        HorizontalAlignment="Left" Margin="0,10,0,0" 
+        Click="ConfigureSplitTunneling_Click"
+        IsEnabled="{Binding ElementName=SplitTunnelingEnabledCheckBox, Path=IsChecked}"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource SettingsCard}">
+                            <StackPanel>
+                                <TextBlock Text="Авто-подключение" Style="{StaticResource SettingsHeader}"/>
+                                <TextBlock Text="Подключаться к VPN при запуске системы." Style="{StaticResource SettingsDescription}"/>
+                                <CheckBox x:Name="StartupCheckBox" Content="Запускать при старте Windows" Checked="StartupCheckBox_Changed" Unchecked="StartupCheckBox_Changed" Style="{StaticResource ToggleSwitchStyle}"/>
+                                <CheckBox x:Name="AutoConnectCheckBox" Content="Подключаться к VPN при запуске приложения" Margin="0,15,0,0" Click="AutoConnectCheckBox_Click" Style="{StaticResource ToggleSwitchStyle}"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource SettingsCard}">
+                            <StackPanel>
+                                <TextBlock Text="Настройки DNS" Style="{StaticResource SettingsHeader}"/>
+                                <TextBlock Text="Использовать собственный DNS-сервер для подключения." Style="{StaticResource SettingsDescription}"/>
+                                <CheckBox x:Name="UseCustomDnsCheckBox" Content="Использовать свой DNS-сервер" Checked="CustomDns_Changed" Unchecked="CustomDns_Changed" Style="{StaticResource ToggleSwitchStyle}"/>
+                                <TextBox x:Name="CustomDnsTextBox" Text="" Margin="0,10,0,10" Style="{StaticResource ThemedTextBoxStyle}"/>
+                                <TextBlock TextWrapping="Wrap" Foreground="{StaticResource ForegroundMutedColor}" FontSize="13">
+                                    Если опция выключена, будет использован DNS для блокировки рекламы (если она включена) или стандартный DNS от Google (8.8.8.8).
+                                </TextBlock>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

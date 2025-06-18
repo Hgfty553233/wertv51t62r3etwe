@@ -1,0 +1,185 @@
+﻿<Window x:Class="MyVpnClientWPF.SpeedTestWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Тест скорости"
+        Height="580" Width="650"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        Background="#F0F2F5">
+    <Window.Resources>
+        <SolidColorBrush x:Key="PrimaryBackgroundColor" Color="#F0F2F5"/>
+        <SolidColorBrush x:Key="SecondaryBackgroundColor" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="AccentColor" Color="#51d0de"/>
+        <SolidColorBrush x:Key="SecondaryAccentColor" Color="#bf4aa8"/>
+        <SolidColorBrush x:Key="ForegroundColor" Color="#1E1E1E"/>
+        <SolidColorBrush x:Key="ForegroundMutedColor" Color="#666666"/>
+        <SolidColorBrush x:Key="BorderColor" Color="#E0E0E0"/>
+        <Geometry x:Key="IconDownload">M9,16V10H5L12,3L19,10H15V16H9M5,20V18H19V20H5Z</Geometry>
+        <Geometry x:Key="IconUpload">M9,4V10H5L12,17L19,10H15V4H9M5,20V22H19V20H5Z</Geometry>
+        <Geometry x:Key="IconPing">M12,2C6.5,2 2,6.5 2,12S6.5,22 12,22 22,17.5 22,12 17.5,2 12,2M12,20C7.59,20 4,16.41 4,12S7.59,4 12,4 20,7.59 20,12 16.41,20 12,20M12.5,7V12.25L16.25,14.43L15.5,15.68L11,13V7H12.5Z</Geometry>
+
+        <Style x:Key="MetricCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource SecondaryBackgroundColor}"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="20"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderColor}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style x:Key="MetricHeaderStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedColor}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,10,0,0"/>
+        </Style>
+
+        <Style x:Key="MetricValueStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="24"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Bottom"/>
+        </Style>
+
+        <Style x:Key="MetricUnitStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedColor}"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="VerticalAlignment" Value="Bottom"/>
+        </Style>
+
+        <Style x:Key="InfoTextStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Foreground" Value="{StaticResource ForegroundColor}"/>
+            <Setter Property="Margin" Value="0,5,0,5"/>
+        </Style>
+
+        <Style x:Key="CloseButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="{StaticResource AccentColor}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Padding" Value="20,10"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="MinWidth" Value="120"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" CornerRadius="17">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Opacity" Value="0.9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Opacity" Value="0.8"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <ControlTemplate x:Key="SpinnerTemplate">
+            <Grid RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform>
+                    <RotateTransform x:Name="SpinnerRotate" Angle="0" />
+                </Grid.RenderTransform>
+                <Ellipse Width="60" Height="60" Stroke="{StaticResource AccentColor}" StrokeThickness="5" StrokeDashArray="2,2"/>
+                <Grid.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation
+                                    Storyboard.TargetName="SpinnerRotate"
+                                    Storyboard.TargetProperty="Angle"
+                                    From="0" To="360" Duration="0:0:1" RepeatBehavior="Forever" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Grid.Triggers>
+            </Grid>
+        </ControlTemplate>
+
+    </Window.Resources>
+
+    <Grid>
+        <StackPanel x:Name="LoadingStateGrid" VerticalAlignment="Center" HorizontalAlignment="Center">
+            <Control Template="{StaticResource SpinnerTemplate}" Width="60" Height="60"/>
+            <TextBlock x:Name="SpeedTestStatusTextBlock" 
+                       Text="Запуск теста скорости... Пожалуйста, подождите." 
+                       Foreground="{StaticResource ForegroundMutedColor}" 
+                       FontSize="16" 
+                       TextAlignment="Center" 
+                       Margin="0,20,0,0"/>
+        </StackPanel>
+
+        <Grid x:Name="ResultsStateGrid" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Text="Результаты теста скорости"
+                       FontSize="28" FontWeight="Bold" Foreground="{StaticResource ForegroundColor}"
+                       HorizontalAlignment="Center" Margin="20,20,20,30"/>
+
+            <UniformGrid Grid.Row="1" Columns="3" Margin="20,0,20,20">
+                <Border Style="{StaticResource MetricCardStyle}" Margin="5">
+                    <StackPanel>
+                        <Path Data="{StaticResource IconDownload}" Fill="{StaticResource AccentColor}" Height="32" Stretch="Uniform"/>
+                        <TextBlock Text="СКАЧИВАНИЕ" Style="{StaticResource MetricHeaderStyle}"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <TextBlock x:Name="DownloadSpeedValueTextBlock" Style="{StaticResource MetricValueStyle}" Text="--"/>
+                            <TextBlock x:Name="DownloadSpeedUnitTextBlock" Style="{StaticResource MetricUnitStyle}" Text="Mbps"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource MetricCardStyle}" Margin="5">
+                    <StackPanel>
+                        <Path Data="{StaticResource IconUpload}" Fill="{StaticResource SecondaryAccentColor}" Height="32" Stretch="Uniform"/>
+                        <TextBlock Text="ЗАГРУЗКА" Style="{StaticResource MetricHeaderStyle}"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <TextBlock x:Name="UploadSpeedValueTextBlock" Style="{StaticResource MetricValueStyle}" Text="--"/>
+                            <TextBlock x:Name="UploadSpeedUnitTextBlock" Style="{StaticResource MetricUnitStyle}" Text="Mbps"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource MetricCardStyle}" Margin="5">
+                    <StackPanel>
+                        <Path Data="{StaticResource IconPing}" Fill="{StaticResource ForegroundMutedColor}" Height="32" Stretch="Uniform"/>
+                        <TextBlock Text="ПИНГ" Style="{StaticResource MetricHeaderStyle}"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <TextBlock x:Name="PingValueTextBlock" Style="{StaticResource MetricValueStyle}" Text="--"/>
+                            <TextBlock x:Name="PingUnitTextBlock" Style="{StaticResource MetricUnitStyle}" Text="ms"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </UniformGrid>
+
+            <Border Grid.Row="2" Style="{StaticResource MetricCardStyle}" Margin="25,0,25,0">
+                <StackPanel Margin="10">
+                    <TextBlock Text="Дополнительная информация:" FontSize="18" FontWeight="SemiBold" Foreground="{StaticResource ForegroundColor}" Margin="0,0,0,10"/>
+                    <TextBlock x:Name="IspTextBlock" Style="{StaticResource InfoTextStyle}"/>
+                    <TextBlock x:Name="ServerTextBlock" Style="{StaticResource InfoTextStyle}"/>
+                    <TextBlock x:Name="IpAddressTextBlock" Style="{StaticResource InfoTextStyle}"/>
+                    <TextBlock x:Name="DnsServersTextBlock" Style="{StaticResource InfoTextStyle}"/>
+                </StackPanel>
+            </Border>
+
+            <Button Grid.Row="3" Content="Закрыть" 
+                    HorizontalAlignment="Center" Margin="0,25,0,20"
+                    Style="{StaticResource CloseButtonStyle}"
+                    Click="CloseButton_Click"/>
+        </Grid>
+    </Grid>
+</Window>

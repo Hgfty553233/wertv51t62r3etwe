@@ -1,0 +1,689 @@
+#include "pch.h" // Всегда первым, если используется предкомпилированный заголовок
+#include <windows.h> // Основные API Windows
+
+// Добавляем Winsock и ICMP API
+#include <winsock2.h> // ДО windows.h для избежания конфликтов определений
+#include <ws2tcpip.h> // Для inet_pton, inet_ntop и других IP-функций
+#include <Iphlpapi.h> // Для IcmpCreateFile, IcmpSendEcho
+#include <Icmpapi.h>  // Для структур ICMP_ECHO_REPLY
+
+// Другие инклуды, которые у вас уже есть
+#include <string>
+#include <fstream>
+#include <stdexcept>
+#include <shlobj.h>
+#include <memory>
+#include <vector>
+#include <array>
+#include <wininet.h>
+#include <shlwapi.h> // Для PathFileExistsW
+#include "include/json.hpp"
+#include <algorithm>
+#include <atomic> // Для isVpnConnected
+#include <cctype> // Для isdigit
+#include <thread>         // Для создания фонового потока
+#include <mutex>          // Для защиты общих данных
+#include <sstream>        // Для удобной работы со строками
+#include <set>            // Для использования std::set
+#include <psapi.h>        // Для EnumProcesses и GetModuleFileNameExW
+#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "iphlpapi.lib") // Линковка с Iphlpapi.lib
+#pragma comment(lib, "ws2_32.lib")   // НОВАЯ ЛИНКОВКА: Для Winsock функций
+#pragma comment(lib, "shlwapi.lib") // НОВАЯ ЛИНКОВКА: Для PathFileExistsW
+
+using json = nlohmann::json;
+
+// --- Структура и глобальные переменные ---
+struct ClientConfig {
+    std::string interface_address;
+    std::string dns_server;
+    std::string server_public_key;
+    std::string server_endpoint; // Адрес сервера для пинга
+    std::string allowed_ips;
+    int persistent_keepalive = 0;
+    int mtu = 0;
+};
+std::string privateKey = "";
+ClientConfig clientConfig;
+std::wstring wgExePath;
+std::wstring wireguardExePath;
+std::wstring appDataPath;
+std::wstring wgConfPath;
+
+// Глобальная переменная для отслеживания состояния VPN
+std::atomic<bool> isVpnConnected = false;
+// Для возврата статической строки в GetStatus
+static char statusBuffer[256];
+std::mutex g_app_list_mutex; // Мьютекс для безопасного доступа к списку
+std::vector<std::string> g_split_tunnel_apps; // Список путей к приложениям для туннелирования
+bool g_split_tunnel_enabled = false; // Флаг, включено ли раздельное туннелирование
+
+// НОВАЯ ПЕРЕМЕННАЯ: По умолчанию блокировка рекламы ВЫКЛЮЧЕНА
+std::atomic<bool> useAdBlockDns = false;
+std::string customDnsAddress = ""; // Для хранения адреса DNS
+std::atomic<bool> useCustomDns = false;   // Для хранения состояния вкл/выкл
+// --- Вспомогательные функции ---
+
+void trim(std::string& s) {
+    const char* t = " \t\n\r\f\v";
+    s.erase(s.find_last_not_of(t) + 1);
+    s.erase(0, s.find_first_not_of(t));
+}
+
+std::string RunCommandAndGetOutput(const std::wstring& command) {
+    HANDLE hChildStd_OUT_Rd = NULL;
+    HANDLE hChildStd_OUT_Wr = NULL;
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+    if (!CreatePipe(&hChildStd_OUT_Rd, &hChildStd_OUT_Wr, &sa, 0)) { throw std::runtime_error("StdoutRd CreatePipe failed"); }
+    if (!SetHandleInformation(hChildStd_OUT_Rd, HANDLE_FLAG_INHERIT, 0)) { throw std::runtime_error("Stdout SetHandleInformation failed"); }
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    si.hStdError = hChildStd_OUT_Wr;
+    si.hStdOutput = hChildStd_OUT_Wr;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    std::unique_ptr<wchar_t[]> cmd(new wchar_t[command.length() + 1]);
+    wcscpy_s(cmd.get(), command.length() + 1, command.c_str());
+    if (!CreateProcessW(NULL, cmd.get(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) { CloseHandle(hChildStd_OUT_Wr); CloseHandle(hChildStd_OUT_Rd); throw std::runtime_error("CreateProcess failed"); }
+    CloseHandle(hChildStd_OUT_Wr);
+
+    std::string result = "";
+    DWORD dwRead;
+    std::array<unsigned char, 4096> ucBuf;
+
+    std::vector<WCHAR> wchBuf(ucBuf.size());
+    std::vector<char> ansichBuf(ucBuf.size() * 2);
+
+    while (ReadFile(hChildStd_OUT_Rd, ucBuf.data(), (DWORD)ucBuf.size() - 1, &dwRead, NULL) && dwRead != 0) {
+        ucBuf.at(dwRead) = '\0';
+
+        int wcharsConverted = MultiByteToWideChar(CP_OEMCP, 0, reinterpret_cast<const char*>(ucBuf.data()), dwRead, wchBuf.data(), (int)wchBuf.size());
+        if (wcharsConverted > 0) {
+            int charsConverted = WideCharToMultiByte(CP_ACP, 0, wchBuf.data(), wcharsConverted, ansichBuf.data(), (int)ansichBuf.size(), NULL, NULL);
+            if (charsConverted > 0) {
+                result.append(ansichBuf.data(), charsConverted);
+            }
+        }
+    }
+    CloseHandle(hChildStd_OUT_Rd);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return result;
+}
+
+std::string GetConfigFromServer(const std::string& publicKey) {
+    HINTERNET hInternet = InternetOpen(L"VPNClient", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    if (!hInternet) throw std::runtime_error("InternetOpen failed");
+    HINTERNET hConnect = InternetConnect(hInternet, L"2.56.89.189", 5000, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 1);
+    if (!hConnect) { InternetCloseHandle(hInternet); throw std::runtime_error("InternetConnect failed"); }
+    HINTERNET hRequest = HttpOpenRequest(hConnect, L"POST", L"/register", NULL, NULL, NULL, 0, 1);
+    if (!hRequest) { InternetCloseHandle(hConnect); InternetCloseHandle(hInternet); throw std::runtime_error("HttpOpenRequest failed"); }
+    json j;
+    j["public_key"] = publicKey;
+    std::string jsonData = j.dump();
+    const wchar_t* headers = L"Content-Type: application/json";
+    if (!HttpSendRequest(hRequest, headers, (DWORD)wcslen(headers), (LPVOID)jsonData.c_str(), (DWORD)jsonData.length())) { InternetCloseHandle(hRequest); InternetCloseHandle(hConnect); InternetCloseHandle(hInternet); throw std::runtime_error("HttpSendRequest failed"); }
+    std::string response;
+    char buffer[1024];
+    DWORD bytesRead = 0;
+    while (InternetReadFile(hRequest, buffer, sizeof(buffer) - 1, &bytesRead) && bytesRead > 0) { buffer[bytesRead] = '\0'; response.append(buffer); }
+    InternetCloseHandle(hRequest);
+    InternetCloseHandle(hConnect);
+    InternetCloseHandle(hInternet);
+    return response;
+}
+
+void ParseConfig(const json& parsedJson) {
+    if (parsedJson.contains("interface_address") && !parsedJson["interface_address"].is_null()) clientConfig.interface_address = parsedJson["interface_address"];
+    if (parsedJson.contains("dns_server") && !parsedJson["dns_server"].is_null()) clientConfig.dns_server = parsedJson["dns_server"];
+    if (parsedJson.contains("server_public_key") && !parsedJson["server_public_key"].is_null()) clientConfig.server_public_key = parsedJson["server_public_key"];
+    if (parsedJson.contains("server_endpoint") && !parsedJson["server_endpoint"].is_null()) clientConfig.server_endpoint = parsedJson["server_endpoint"];
+    if (parsedJson.contains("allowed_ips") && !parsedJson["allowed_ips"].is_null()) clientConfig.allowed_ips = parsedJson["allowed_ips"];
+    if (parsedJson.contains("persistent_keepalive") && !parsedJson["persistent_keepalive"].is_null()) clientConfig.persistent_keepalive = parsedJson["persistent_keepalive"];
+    if (parsedJson.contains("mtu") && !parsedJson["mtu"].is_null()) clientConfig.mtu = parsedJson["mtu"];
+}
+
+void GenerateKeysAndRegister() {
+    std::wstring privateKeyPath = appDataPath + L"\\private.key";
+    std::wstring publicKeyPath = appDataPath + L"\\public.key";
+
+    // Вызываем команды через "cmd.exe /C", чтобы операторы ">" и "<" сработали.
+    std::wstring genkeyCommand = L"cmd.exe /C \"\"" + wgExePath + L"\" genkey > \"" + privateKeyPath + L"\"\"";
+    std::wstring pubkeyCommand = L"cmd.exe /C \"\"" + wgExePath + L"\" pubkey < \"" + privateKeyPath + L"\" > \"" + publicKeyPath + L"\"\"";
+
+    RunCommandAndGetOutput(genkeyCommand);
+    Sleep(200); // Небольшая пауза, чтобы файл успел записаться на диск
+
+    std::ifstream privateKeyFile(privateKeyPath);
+    if (!privateKeyFile.good()) throw std::runtime_error("Failed to create or read private key file.");
+    std::getline(privateKeyFile, privateKey);
+    trim(privateKey);
+    privateKeyFile.close();
+    if (privateKey.empty()) throw std::runtime_error("Generated private key is empty.");
+
+    RunCommandAndGetOutput(pubkeyCommand);
+    Sleep(200); // Небольшая пауза
+
+    std::ifstream publicKeyFile(publicKeyPath);
+    if (!publicKeyFile.good()) throw std::runtime_error("Failed to create or read public key file.");
+    std::string publicKey;
+    std::getline(publicKeyFile, publicKey);
+    trim(publicKey);
+    publicKeyFile.close();
+    if (publicKey.empty()) throw std::runtime_error("Generated public key is empty.");
+
+    DeleteFileW(privateKeyPath.c_str());
+    DeleteFileW(publicKeyPath.c_str());
+
+    std::string jsonResponse = GetConfigFromServer(publicKey);
+    if (jsonResponse.find("error") != std::string::npos) {
+        throw std::runtime_error("Server returned an error: " + jsonResponse);
+    }
+
+    json parsedJson = json::parse(jsonResponse);
+    ParseConfig(parsedJson);
+
+    std::ofstream finalPrivateKeyFile(appDataPath + L"\\wg_private.key");
+    finalPrivateKeyFile << privateKey;
+    finalPrivateKeyFile.close();
+    std::ofstream finalConfigFile(appDataPath + L"\\wg_config.json");
+    finalConfigFile << jsonResponse;
+    finalConfigFile.close();
+}
+void PipeServerThread() {
+    const wchar_t* pipeName = L"\\\\.\\pipe\\MySuperVpnPipe";
+    char buffer[1024];
+    DWORD bytesRead;
+
+    while (true) {
+        HANDLE hPipe = CreateNamedPipeW(
+            pipeName,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1, 1024, 1024, 0, NULL);
+
+        if (hPipe == INVALID_HANDLE_VALUE) {
+            Sleep(5000); // Если не удалось создать, ждем и пробуем снова
+            continue;
+        }
+
+        // Ждем подключения клиента (C#)
+        if (ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED)) {
+            // Читаем данные от клиента
+            if (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
+                buffer[bytesRead] = '\0';
+                std::string command(buffer);
+
+                // Парсим команду. Ожидаем формат "SET_APPS:path1.exe;path2.exe;..."
+                if (command.rfind("SET_APPS:", 0) == 0) {
+                    std::string paths_str = command.substr(9);
+                    std::vector<std::string> temp_apps;
+                    std::stringstream ss(paths_str);
+                    std::string path;
+
+                    while (std::getline(ss, path, ';')) {
+                        if (!path.empty()) {
+                            temp_apps.push_back(path);
+                        }
+                    }
+
+                    // Блокируем мьютекс для безопасной записи в глобальный список
+                    std::lock_guard<std::mutex> lock(g_app_list_mutex);
+                    g_split_tunnel_apps = temp_apps;
+                    g_split_tunnel_enabled = !g_split_tunnel_apps.empty();
+                }
+            }
+        }
+        DisconnectNamedPipe(hPipe);
+        CloseHandle(hPipe);
+    }
+}
+std::string GetIPsForSelectedApps() {
+    std::vector<std::string> process_paths;
+    {
+        // Копируем список, чтобы не держать мьютекс заблокированным надолго
+        std::lock_guard<std::mutex> lock(g_app_list_mutex);
+        process_paths = g_split_tunnel_apps;
+    }
+
+    if (process_paths.empty()) {
+        return "0.0.0.0/0"; // Если ничего не выбрано, туннелируем весь трафик
+    }
+
+    // 1. Находим PID запущенных процессов из нашего списка
+    std::vector<DWORD> pids;
+    for (const auto& path : process_paths) {
+        // Чтобы найти процесс по пути, нужно перебрать все процессы
+        // Это не очень эффективно, но для Стратегии А подойдет
+        DWORD processes[1024], bytes_returned;
+        if (EnumProcesses(processes, sizeof(processes), &bytes_returned)) {
+            for (unsigned int i = 0; i < bytes_returned / sizeof(DWORD); i++) {
+                HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processes[i]);
+                if (hProcess) {
+                    WCHAR szProcessPath[MAX_PATH];
+                    if (GetModuleFileNameExW(hProcess, NULL, szProcessPath, MAX_PATH)) {
+                        std::wstring ws(szProcessPath);
+                        std::string current_path(ws.begin(), ws.end());
+                        if (_stricmp(current_path.c_str(), path.c_str()) == 0) {
+                            pids.push_back(processes[i]);
+                        }
+                    }
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+    }
+
+    if (pids.empty()) {
+        return "0.0.0.0/0"; // Если выбранные приложения не запущены
+    }
+
+    // 2. Получаем все TCP соединения в системе
+    std::set<std::string> unique_ips;
+    PMIB_TCPTABLE_OWNER_PID tcpTable;
+    DWORD size = 0;
+
+    // Вызываем первый раз, чтобы получить нужный размер буфера
+    if (GetExtendedTcpTable(NULL, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == ERROR_INSUFFICIENT_BUFFER) {
+        tcpTable = (PMIB_TCPTABLE_OWNER_PID)new char[size];
+        if (GetExtendedTcpTable(tcpTable, &size, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR) {
+            // 3. Ищем соединения, принадлежащие нашим PID
+            for (DWORD i = 0; i < tcpTable->dwNumEntries; i++) {
+                for (DWORD pid : pids) {
+                    if (tcpTable->table[i].dwOwningPid == pid) {
+                        struct in_addr addr;
+                        addr.S_un.S_addr = tcpTable->table[i].dwRemoteAddr;
+                        char str[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &addr, str, INET_ADDRSTRLEN);
+                        unique_ips.insert(std::string(str) + "/32");
+                    }
+                }
+            }
+        }
+        delete[] tcpTable;
+    }
+
+    if (unique_ips.empty()) {
+        return "0.0.0.0/0"; // Если не найдено активных соединений
+    }
+
+    // 4. Формируем строку для AllowedIPs
+    std::string result = "";
+    for (const auto& ip : unique_ips) {
+        result += ip + ", ";
+    }
+    // Удаляем последнюю запятую и пробел
+    return result.substr(0, result.length() - 2);
+}
+extern "C" {
+#define VPNCORE_API __declspec(dllexport)
+    void InitializePaths() {
+        wchar_t pf[MAX_PATH];
+        SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES, NULL, 0, pf);
+        wgExePath = std::wstring(pf) + L"\\WireGuard\\wg.exe";
+        wireguardExePath = std::wstring(pf) + L"\\WireGuard\\wireguard.exe";
+        wchar_t ad[MAX_PATH];
+        SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, ad);
+        appDataPath = std::wstring(ad) + L"\\MySuperVpn";
+        CreateDirectoryW(appDataPath.c_str(), NULL);
+        wgConfPath = appDataPath + L"\\wg_profile.conf";
+
+        // Инициализация Winsock
+        WSADATA wsaData;
+        int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+        if (iResult != 0) {
+            MessageBoxA(NULL, "WSAStartup failed", "Winsock Error", MB_OK | MB_ICONERROR);
+        }
+    }
+    VPNCORE_API void InitializePipeServer() {
+        // Запускаем сервер именованного канала в отдельном потоке
+        // Этот способ безопасен, так как будет вызван из C# после полной загрузки DLL
+        std::thread serverThread(PipeServerThread);
+        serverThread.detach();
+    }
+
+    VPNCORE_API bool Connect() {
+        try {
+            InitializePaths();
+            std::ifstream keyFile(appDataPath + L"\\wg_private.key");
+            std::ifstream configFile(appDataPath + L"\\wg_config.json");
+            if (keyFile.good() && configFile.good()) {
+                std::getline(keyFile, privateKey);
+                trim(privateKey);
+                json parsedJson = json::parse(configFile);
+                ParseConfig(parsedJson);
+            }
+            else {
+                GenerateKeysAndRegister();
+            }
+            keyFile.close();
+            configFile.close();
+
+            if (privateKey.empty() || clientConfig.server_public_key.empty() || clientConfig.server_endpoint.empty()) {
+                throw std::runtime_error("Ключевые поля конфигурации (ключ/эндпоинт) пусты после получения от сервера.");
+            }
+
+            std::ofstream finalConf(wgConfPath);
+            finalConf << "[Interface]\n";
+            finalConf << "PrivateKey = " << privateKey << "\n";
+            finalConf << "Address = " << clientConfig.interface_address << "\n";
+            // ЗАМЕНИТЕ СТАРЫЙ БЛОК IF/ELSE НА ЭТОТ
+            if (useCustomDns && !customDnsAddress.empty()) {
+                // 1. Если включен пользовательский DNS и он не пустой - используем его
+                finalConf << "DNS = " << customDnsAddress << "\n";
+            }
+            else if (useAdBlockDns) {
+                // 2. Иначе, если включен AdBlock - используем DNS для блокировки рекламы
+                finalConf << "DNS = " << clientConfig.dns_server << "\n";
+            }
+            else {
+                // 3. Во всех остальных случаях - используем стандартный DNS
+                finalConf << "DNS = 8.8.8.8\n";
+            }
+            finalConf << "MTU = " << clientConfig.mtu << "\n\n";
+            finalConf << "[Peer]\n";
+            finalConf << "PublicKey = " << clientConfig.server_public_key << "\n";
+            // ЗАМЕНИТЕ СТАРУЮ СТРОКУ "AllowedIPs" НА ЭТОТ БЛОК
+            std::string allowedIps;
+            if (g_split_tunnel_enabled) {
+                allowedIps = GetIPsForSelectedApps();
+            }
+            else {
+                allowedIps = "0.0.0.0/0";
+            }
+            finalConf << "AllowedIPs = " << allowedIps << "\n";
+            // КОНЕЦ ЗАМЕНЫ
+            finalConf << "Endpoint = " << clientConfig.server_endpoint << "\n";
+            finalConf << "PersistentKeepalive = " << clientConfig.persistent_keepalive << "\n";
+            finalConf.close();
+
+            std::wstring uninstallCommand = L"\"" + wireguardExePath + L"\" /uninstalltunnelservice wg_profile";
+            std::wstring installCommand = L"\"" + wireguardExePath + L"\" /installtunnelservice \"" + wgConfPath + L"\"";
+
+            RunCommandAndGetOutput(uninstallCommand);
+            Sleep(500);
+
+            std::string installOutput = RunCommandAndGetOutput(installCommand);
+            if (!installOutput.empty() &&
+                installOutput.find("Tunnel already installed and running") == std::string::npos &&
+                installOutput.find("The service already exists") == std::string::npos) {
+                throw std::runtime_error(installOutput);
+            }
+            isVpnConnected = true;
+            return true;
+        }
+        catch (const std::exception& e) {
+            MessageBoxA(NULL, e.what(), "C++ Core Error", MB_OK | MB_ICONERROR);
+            isVpnConnected = false;
+            return false;
+        }
+    }
+    // Добавьте эту функцию в VpnCore.cpp
+    // Добавьте эту новую функцию в VpnCore.cpp
+
+
+    VPNCORE_API const char* GetEffectiveDns() {
+        if (useCustomDns && !customDnsAddress.empty()) {
+            strcpy_s(statusBuffer, sizeof(statusBuffer), customDnsAddress.c_str());
+        }
+        else if (useAdBlockDns) {
+            strcpy_s(statusBuffer, sizeof(statusBuffer), clientConfig.dns_server.c_str());
+        }
+        else {
+            strcpy_s(statusBuffer, sizeof(statusBuffer), "8.8.8.8 (Google DNS)"); // Указываем, что это Google DNS
+        }
+        return statusBuffer;
+    }
+    VPNCORE_API bool Disconnect() {
+        try {
+            InitializePaths();
+            std::wstring uninstallCommand = L"\"" + wireguardExePath + L"\" /uninstalltunnelservice wg_profile";
+            RunCommandAndGetOutput(uninstallCommand);
+            isVpnConnected = false;
+            return true;
+        }
+        catch (...) {
+            isVpnConnected = false;
+            return false;
+        }
+    }
+
+    VPNCORE_API const char* GetStatus() {
+        if (isVpnConnected) {
+            strcpy_s(statusBuffer, sizeof(statusBuffer), "Подключен");
+        }
+        else {
+            strcpy_s(statusBuffer, sizeof(statusBuffer), "Отключен");
+        }
+        return statusBuffer;
+    }
+
+    VPNCORE_API int GetPing() {
+        std::ofstream debugLog("C:\\vpn_debug_log.txt", std::ios_base::app);
+
+        if (!isVpnConnected) {
+            debugLog << "Ping (ICMP API): VPN not connected. Returning -1.\n";
+            debugLog.close();
+            return -1;
+        }
+
+        if (clientConfig.server_endpoint.empty()) {
+            debugLog << "Ping (ICMP API): Server endpoint is empty. Returning -2.\n";
+            debugLog.close();
+            return -2;
+        }
+
+        std::string endpointStr = clientConfig.server_endpoint;
+        size_t colonPos = endpointStr.find(':');
+        if (colonPos != std::string::npos) {
+            endpointStr = endpointStr.substr(0, colonPos);
+        }
+        if (endpointStr.empty()) {
+            debugLog << "Ping (ICMP API): Endpoint became empty after processing. Returning -5.\n";
+            debugLog.close();
+            return -5;
+        }
+
+        struct in_addr addr;
+        if (inet_pton(AF_INET, endpointStr.c_str(), &addr) != 1) {
+            debugLog << "Ping (ICMP API): Endpoint '" << endpointStr << "' is not a valid IPv4 address. Returning -7.\n";
+            debugLog.close();
+            return -7;
+        }
+
+        HANDLE hIcmpFile;
+        char SendData[32] = "Echo Request Data";
+        DWORD ReplySize = sizeof(ICMP_ECHO_REPLY) + sizeof(SendData) + 8;
+        LPVOID ReplyBuffer = new char[ReplySize];
+
+        hIcmpFile = IcmpCreateFile();
+        if (hIcmpFile == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            debugLog << "Ping (ICMP API): IcmpCreateFile failed with error " << err << ". Returning -8.\n";
+            debugLog.close();
+            delete[] ReplyBuffer;
+            return -8;
+        }
+
+        DWORD dwRetVal = IcmpSendEcho(hIcmpFile, addr.S_un.S_addr, SendData, sizeof(SendData),
+            NULL, ReplyBuffer, ReplySize, 1000);
+
+        int pingTime = -9;
+
+        if (dwRetVal != 0) {
+            PICMP_ECHO_REPLY pEchoReply = (PICMP_ECHO_REPLY)ReplyBuffer;
+            if (pEchoReply->Status == IP_SUCCESS) {
+                pingTime = pEchoReply->RoundTripTime;
+                debugLog << "Ping (ICMP API): Successfully received echo reply. RTT: " << pingTime << "ms. Status: " << pEchoReply->Status << "\n";
+            }
+            else {
+                debugLog << "Ping (ICMP API): Received ICMP error reply. Status: " << pEchoReply->Status << ". Returning -10.\n";
+                pingTime = -10;
+            }
+        }
+        else {
+            DWORD err = GetLastError();
+            if (err == IP_REQ_TIMED_OUT) {
+                debugLog << "Ping (ICMP API): Request timed out. Returning -11.\n";
+                pingTime = -11;
+            }
+            else {
+                debugLog << "Ping (ICMP API): IcmpSendEcho failed with GetLastError: " << err << ". Returning -12.\n";
+                pingTime = -12;
+            }
+        }
+
+        IcmpCloseHandle(hIcmpFile);
+        delete[] ReplyBuffer;
+
+        debugLog.close();
+        return pingTime;
+    }
+
+    VPNCORE_API int GetPublicPing(const char* targetIpCStr) {
+        std::ofstream debugLog("C:\\vpn_debug_log.txt", std::ios_base::app);
+
+        if (targetIpCStr == nullptr || strlen(targetIpCStr) == 0) {
+            debugLog << "Ping (Public ICMP API): Target IP is null or empty. Returning -2.\n";
+            debugLog.close();
+            return -2;
+        }
+
+        std::string endpointStr = targetIpCStr;
+        size_t colonPos = endpointStr.find(':');
+        if (colonPos != std::string::npos) {
+            endpointStr = endpointStr.substr(0, colonPos);
+        }
+        if (endpointStr.empty()) {
+            debugLog << "Ping (Public ICMP API): Endpoint became empty after processing. Returning -5.\n";
+            debugLog.close();
+            return -5;
+        }
+
+        struct in_addr addr;
+        if (inet_pton(AF_INET, endpointStr.c_str(), &addr) != 1) {
+            debugLog << "Ping (Public ICMP API): Endpoint '" << endpointStr << "' is not a valid IPv4 address. Returning -7.\n";
+            debugLog.close();
+            return -7;
+        }
+
+        HANDLE hIcmpFile;
+        char SendData[32] = "Echo Request Data";
+        DWORD ReplySize = sizeof(ICMP_ECHO_REPLY) + sizeof(SendData) + 8;
+        LPVOID ReplyBuffer = new char[ReplySize];
+
+        hIcmpFile = IcmpCreateFile();
+        if (hIcmpFile == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            debugLog << "Ping (Public ICMP API): IcmpCreateFile failed with error " << err << ". Returning -8.\n";
+            debugLog.close();
+            delete[] ReplyBuffer;
+            return -8;
+        }
+
+        DWORD dwRetVal = IcmpSendEcho(hIcmpFile, addr.S_un.S_addr, SendData, sizeof(SendData),
+            NULL, ReplyBuffer, ReplySize, 1000);
+
+        int pingTime = -9;
+
+        if (dwRetVal != 0) {
+            PICMP_ECHO_REPLY pEchoReply = (PICMP_ECHO_REPLY)ReplyBuffer;
+            if (pEchoReply->Status == IP_SUCCESS) {
+                pingTime = pEchoReply->RoundTripTime;
+                debugLog << "Ping (Public ICMP API): Successfully received echo reply. RTT: " << pingTime << "ms. Status: " << pEchoReply->Status << "\n";
+            }
+            else {
+                debugLog << "Ping (Public ICMP API): Received ICMP error reply. Status: " << pEchoReply->Status << ". Returning -10.\n";
+                pingTime = -10;
+            }
+        }
+        else {
+            DWORD err = GetLastError();
+            if (err == IP_REQ_TIMED_OUT) {
+                debugLog << "Ping (Public ICMP API): Request timed out. Returning -11.\n";
+                pingTime = -11;
+            }
+            else {
+                debugLog << "Ping (Public ICMP API): IcmpSendEcho failed with GetLastError: " << err << ". Returning -12.\n";
+                pingTime = -12;
+            }
+        }
+
+        IcmpCloseHandle(hIcmpFile);
+        delete[] ReplyBuffer;
+
+        debugLog.close();
+        return pingTime;
+    }
+
+    // НОВАЯ ФУНКЦИЯ: Заглушка для включения/выключения AdBlock
+    VPNCORE_API bool EnableAdBlock(bool enable) {
+        useAdBlockDns = enable;
+        return true;
+    }
+
+    // НОВАЯ ФУНКЦИЯ: Заглушка для включения/выключения режима максимальной анонимности
+    VPNCORE_API bool EnableMaxAnonymityMode(bool enable) {
+        std::ofstream debugLog("C:\\vpn_debug_log.txt", std::ios_base::app);
+        debugLog << "Max Anonymity Mode: " << (enable ? "Enabled" : "Disabled") << ". (Заглушка)\n";
+        debugLog.close();
+        // Здесь будет реальная логика включения/выключения режима анонимности
+        return true; // Всегда успешно для заглушки
+    }
+
+    // НОВАЯ ФУНКЦИЯ: Заглушка для запуска теста скорости
+    // НОВАЯ ФУНКЦИЯ: Запуск теста скорости и возврат результата
+    VPNCORE_API const char* RunSpeedTest() {
+        static std::string speedTestOutputBuffer; // Буфер для хранения вывода
+
+        std::ofstream debugLog("C:\\vpn_debug_log.txt", std::ios_base::app);
+        debugLog << "Speed Test: Running real implementation.\n";
+        debugLog.close();
+
+        InitializePaths(); // Убедимся, что пути инициализированы
+        // InitializePaths(); // Инициализация путей может быть не нужна для speedtest.exe, если он лежит рядом с основным EXE
+
+        wchar_t modulePath[MAX_PATH];
+        GetModuleFileNameW(NULL, modulePath, MAX_PATH); // Получаем полный путь к текущему исполняемому файлу
+        std::wstring exeDirectory = modulePath;
+        size_t lastSlash = exeDirectory.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos) {
+            exeDirectory = exeDirectory.substr(0, lastSlash); // Получаем директорию EXE
+        }
+
+        std::wstring speedTestExePath = exeDirectory + L"\\speedtest.exe"; // speedtest.exe рядом с основным EXE
+
+        // Проверяем существование файла speedtest.exe
+        if (!PathFileExistsW(speedTestExePath.c_str())) {
+            speedTestOutputBuffer = "Ошибка: speedtest.exe не найден по пути: ";
+            speedTestOutputBuffer += std::string(speedTestExePath.begin(), speedTestExePath.end());
+            return speedTestOutputBuffer.c_str();
+        }
+
+        std::wstring command = L"\"" + speedTestExePath + L"\" --accept-license --accept-gdpr -f json"; // Запускаем speedtest с выводом JSON
+
+        try {
+            speedTestOutputBuffer = RunCommandAndGetOutput(command);
+            // speedTestOutputBuffer будет содержать JSON-вывод от speedtest.exe
+            return speedTestOutputBuffer.c_str();
+        }
+        catch (const std::exception& e) {
+            speedTestOutputBuffer = "Ошибка при запуске speedtest: ";
+            speedTestOutputBuffer += e.what();
+            return speedTestOutputBuffer.c_str();
+        }
+    }
+    // ДОБАВЬТЕ ЭТУ НОВУЮ ФУНКЦИЮ
+    VPNCORE_API void SetCustomDns(const char* dns, bool use_it) {
+        if (dns != nullptr) {
+            customDnsAddress = dns;
+        }
+        else {
+            customDnsAddress = "";
+        }
+        useCustomDns = use_it;
+    }
+} // Конец extern "C"
